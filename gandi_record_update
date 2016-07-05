@@ -1,0 +1,84 @@
+#!/bin/env perl
+use warnings;
+use strict;
+use RPC::XML::Client;
+
+sub help
+{
+    print('Usage: GANDI="<apikey>|<domain>|<record>|<type>|<value>|<ttl>" gandi_record_update' . "\n" .
+          '  <apikey> Your Gandi API key' . "\n" .
+          '  <domain> The domain name, e.g.: mydomain.com' . "\n" .
+          '  <record> The name of the record, if it doesn\'t exist it will be created, if it already exists it will be updated' . "\n" .
+          '  <type>   The record\'s type, e.g.: A, CNAME, etc' . "\n" .
+          '  <value>  The record\'s value. If "myip" is given, http://bot.whatismyipaddress.com will be used to figure out your public IP' . "\n" .
+          '  <ttl>    The record\'s time to live, in seconds, e.g.: 600' . "\n" .
+          "\n" .
+          'Examples:' . "\n" .
+          '  GANDI="3z1fXG4A5z3g43R5e4g354B1|mydomain.com|home|A|myip|600" gandi_record_update' . "\n" .
+          '  GANDI="3z1fXG4A5z3g43R5e4g354B1|example.org|orange|CNAME|black|3600" gandi_record_update' . "\n" .
+          '  GANDI="3z1fXG4A5z3g43R5e4g354B1|test.net|jupiter|A|10.11.12.13|300" gandi_record_update' . "\n" .
+          '  GANDI="3z1fXG4A5z3g43R5e4g354B1|ipv6forlife.se|www|AAAA|2001:789:42::1|300" gandi_record_update' . "\n" .
+          "\n" .
+          'The GANDI environment variable is used to hide the parameters from other users using ps' . "\n" .
+          "\n");
+}
+
+
+
+
+# -h, --help
+if(@ARGV == 1 && $ARGV[0] =~ /^(-h|--help)$/) { help(); exit(0); }
+
+# handle wrong/unknown arguments
+if(@ARGV != 0) { print('Error: This command does not take any arguments' . "\n\n"); help(); exit(1); }
+if(!exists($ENV{'GANDI'})) { print('Error: Missing GANDI environment variable' . "\n\n"); help(); exit(1); }
+
+# parse GANDI environment variable
+my ($apikey, $domain, $record, $type, $value, $ttl);
+if($ENV{'GANDI'} =~ /^([0-9A-Za-z]{24})\|(.+)\|(.+)\|(.+)\|(.+)\|(\d+)$/) 
+{
+    ($apikey, $domain, $record, $type, $value, $ttl) = ($1, $2, $3, $4, $5, $6);
+}
+else { print('Error: Syntax error in GANDI environment variable' . "\n\n"); help(); exit(1); }
+
+# auto-detect IP if requested
+if($value eq 'myip') 
+{
+    $value = `wget -O- -q http://bot.whatismyipaddress.com`;
+    if($value !~ /^\d+\.\d+\.\d+\.\d+$/) { print('Error while auto-detecting the IP: ' . $value . "\n"); exit(1); }
+    print('Auto-detected IP: ' . $value . "\n");
+}
+
+
+
+# connect to rpc server and fetch current zone
+my $rpc = RPC::XML::Client->new('https://rpc.gandi.net/xmlrpc/');
+my $r = gandi_xml($rpc, 'domain.info', $apikey, $domain);
+my $zone_id = $r->{'zone_id'};
+
+# check if an update is needed
+$r = gandi_xml($rpc, 'domain.zone.record.list', $apikey, $zone_id, 0, { 'name' => $record, 'type' => $type });
+my $exists = scalar(@{$r});
+if($exists && $r->[0]{'value'} eq $value) { print('Record is already present and up to date, nothing to do' . "\n"); exit(0); }
+
+# update zone: clone current zone && delete record if present && add record && activate new zone
+my $new_zone_version = gandi_xml($rpc, 'domain.zone.version.new', $apikey, $zone_id, 0);
+if($exists) { gandi_xml($rpc, 'domain.zone.record.delete', $apikey, $zone_id, $new_zone_version, { 'name' => $record }); }
+gandi_xml($rpc, 'domain.zone.record.add', $apikey, $zone_id, $new_zone_version, { 'name' => $record, 'type' => $type, 'ttl' => $ttl, 'value' => $value });
+gandi_xml($rpc, 'domain.zone.version.set', $apikey, $zone_id, $new_zone_version);
+print('Record updated with success' . "\n");
+exit(0);
+
+
+
+sub gandi_xml
+{
+    my ($rpc, @args) = @_;
+
+    my $r = $rpc->send_request(@args);
+    if(! ref $r) { die('XML-RPC connection failed: ' . $r); }
+    if($r->is_fault) { die('XML-RPC error: ' . $r->string); } 
+    return($r->value);
+}
+
+
